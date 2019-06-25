@@ -17,15 +17,16 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import argparse
-import subprocess
-import re
-import tempfile
-import curses
-import os
-import functools
-import difflib
-import configparser
 import binascii
+import configparser
+import curses
+import functools
+import os
+import re
+import subprocess
+import lxml
+from collections import Counter
+from xmldiff import main, formatting
 
 TSHARK_FILTER_FLAG = None
 DEFAULT_CONFIG = os.path.expanduser("~/.smbcmp")
@@ -33,8 +34,10 @@ KEY = {}
 CONF = configparser.ConfigParser()
 CRYPTO_KEY = {}
 
+
 def load_config(fn):
     CONF.read(fn)
+
     def k(name, default):
         KEY[name] = CONF['global'].get('key_'+name, default)
     k('lwin_next', 'd')
@@ -47,6 +50,7 @@ def load_config(fn):
     k('bwin_prev', 'n')
     k('vsplit_up', 'KEY_PPAGE')
     k('vsplit_down', 'KEY_NPAGE')
+
 
 def wireshark_checks(args):
     try:
@@ -73,12 +77,14 @@ def wireshark_checks(args):
             print("your version of tshark doesn't support decryption")
             raise
 
+
 def strip_packet_no(arg):
     try:
         i = arg.rindex(":")
         return arg[:i]
     except Exception:
         return arg
+
 
 def split_packet_arg(arg):
     try:
@@ -88,6 +94,7 @@ def split_packet_arg(arg):
         return (fn, no)
     except Exception:
         raise Exception("invalid packet:no specified")
+
 
 def extract_kernel_keys(log):
     r = {}
@@ -102,6 +109,7 @@ def extract_kernel_keys(log):
             r[last_id] = last_key
             last_key = last_id = None
     return r
+
 
 def load_crypto_keys(args):
     # try dmesg
@@ -122,6 +130,7 @@ def load_crypto_keys(args):
         else:
             raise Exception("<%s> is neither a file nor a hex SID,KEY string"%kp)
 
+
 def diff_split(w, h, vratio):
     lw = (w-1)//2
     rw = w-1-lw
@@ -129,20 +138,25 @@ def diff_split(w, h, vratio):
     bh = h-1-th
     return lw, rw, th, bh
 
+
 def single_split(w, h, vratio):
     th = int((h-1)*vratio)
     bh = h-1-th
     return th, bh
 
+
 def tshark(*args):
     binpath = CONF['global'].get('tshark_path', 'tshark')
     return [binpath] + list(args)
 
+
 def bytes_to_hex(b):
     return binascii.hexlify(b).decode('ascii')
 
+
 def hex_to_bytes(h):
     return binascii.unhexlify(h.replace(' ', ''))
+
 
 def tshark_keys_opts():
     r = []
@@ -166,18 +180,21 @@ def smb_summaries(pcap):
 
 @functools.lru_cache(maxsize=128)
 def smb_packet(pcap, no):
+    """ Show the content of a packet
+
+    Keyword arguments
+
+    pcap -- name of the capture file
+
+    no -- number of the packet
+
+    """
     cmd = tshark(*tshark_keys_opts())
     cmd += ['-r', pcap, TSHARK_FILTER_FLAG, 'frame.number == %d'%no, '-V']
     out = subprocess.check_output(cmd).decode('utf-8')
     out = re.sub(r'^[\s\S]+\nSMB', 'SMB', out, re.S)
     return out
 
-@functools.lru_cache(maxsize=128)
-def smb_diff(a, b):
-    lines = difflib.unified_diff(smb_packet(a[0], a[1]).split("\n"),
-                                 smb_packet(b[0], b[1]).split("\n"),
-                                 a[0], b[0], lineterm="")
-    return "\n".join(lines)
 
 class BufferViewer(object):
     def __init__(self, win, data, hl=True, diff=False, rxhl=None):
@@ -200,7 +217,7 @@ class BufferViewer(object):
         self.refresh()
 
     def set_rxhl(self, rxhl):
-        self.rxhl = [(re.compile(rx), col) for rx,col in rxhl]
+        self.rxhl = [(re.compile(rx), col) for rx, col in rxhl]
 
     def height(self):
         return self.win.getmaxyx()[0]
@@ -213,6 +230,9 @@ class BufferViewer(object):
 
     def is_cursor_at_top(self):
         return self.cursor == self.top
+
+    def getselected(self):
+        return self.selected
 
     def move(self, direction):
         if direction > 0 and self.cursor < len(self.lines)-1:
@@ -227,26 +247,29 @@ class BufferViewer(object):
     def refresh(self):
         self.win.erase()
         for nr, line in enumerate(self.lines[self.top:self.top+self.height()]):
-            line = line.replace('\t', '    ')
             line = line[:self.width()-1]
             line = line.ljust(self.width()-1)
             attr = curses.A_NORMAL
 
             def write(s, a, x=0):
                 if self.hl and self.cursor - self.top == nr:
-                    a = a|curses.A_REVERSE
+                    a = a | curses.A_REVERSE
+                    self.selected = line
                 self.win.addstr(nr, x, s, a)
-
             if self.diff:
-                if line[0] == '-':
-                    attr = attr|curses.color_pair(1)
-                elif line[0] == '+':
-                    attr = attr|curses.color_pair(2)
+                if "-" in line:
+                    attr = attr | curses.color_pair(1)
+                elif "+" in line:
+                    attr = attr | curses.color_pair(2)
+                elif "→" in line:
+                    attr = attr | curses.color_pair(3)
+                elif "*" in line:
+                    attr = attr | curses.color_pair(4)
 
             write(line, attr)
 
             if not self.diff and self.rxhl:
-                for rx,col in self.rxhl:
+                for rx, col in self.rxhl:
                     for m in rx.finditer(line):
                         write(m.group(1), col, x=m.start(1))
 
@@ -254,10 +277,25 @@ class BufferViewer(object):
 
 
 class TraceViewer(object):
+    """ Browse packet names of a capture file with a cursor
+
+    Keyword arguments:
+
+    win -- the windows object representing the part of the screen occupied
+
+    cap -- name of the capture file
+
+    buf -- content of the window
+
+    nos -- ordered list of packets numbers
+
+    pkts -- set of numbered packets
+
+    """
     def __init__(self, win, cap):
         self.buf = BufferViewer(win, '')
         self.buf.set_rxhl([
-            (r'''(Error)''', curses.color_pair(1)|curses.A_BOLD),
+            (r'''(Error)''', curses.color_pair(1) | curses.A_BOLD),
         ])
         self.set_cap(cap)
 
@@ -271,7 +309,7 @@ class TraceViewer(object):
         self.buf.set_data('\n'.join(lines))
 
     def get_packet(self):
-        return (self.cap, self.nos[self.buf.cursor])
+        return (self.cap, self.buf.cursor+1)
 
     def move(self, direction):
         self.buf.move(direction)
@@ -279,12 +317,196 @@ class TraceViewer(object):
     def refresh(self):
         self.buf.refresh()
 
+
+class PDMLDiff:
+    """ compute diffs between two PDML with smb* trees extracted
+
+    Class variable:
+
+    diffs -- dictionnary containing diffs
+    ignored_fields -- list of ignored fields while diffing
+    """
+
+    diffs = dict()
+    ignored_fields = set()
+    ignorable_fields = set()
+
+    def __init__(self, filea, fileb):
+        cmd1 = tshark(*tshark_keys_opts())
+        cmd1 += ['-r', filea, TSHARK_FILTER_FLAG, 'not browser and smb or smb2', '-Tpdml']
+        cmd2 = tshark(*tshark_keys_opts())
+        cmd2 += ['-r', fileb, TSHARK_FILTER_FLAG, 'not browser and smb or smb2', '-Tpdml']
+        out1 = subprocess.check_output(cmd1)
+        out2 = subprocess.check_output(cmd2)
+        self.save_diffs(out1, out2)
+
+    def getignored_fields(self):
+        return self.ignored_fields
+
+    def setignored_fields(self, field):
+        if field in self.ignored_fields:
+            self.ignored_fields.remove(field)
+        else:
+            self.ignored_fields.add(field)
+
+    def getignorable_fields(self):
+        return self.ignorable_fields
+
+    def save_diffs(self, pdml1, pdml2):
+        """ Populate self.diffs
+
+        Keyword arguments:
+
+        pdml1 -- first pdml string
+
+        pdml2 -- second pdml string
+        """
+        root1 = lxml.etree.fromstring(pdml1)
+        root2 = lxml.etree.fromstring(pdml2)
+
+        # loop variables
+        index1 = 0
+        index2 = 0
+        for tag1 in root1.iter("field"):
+            name1 = str(tag1.get("name"))
+            if ".cmd" in name1:
+                index1 = index1 + 1
+                name1 = str(tag1.get("showname"))
+                index2 = 0
+                for tag2 in root2.iter("field"):
+                    name2 = str(tag2.get("name"))
+                    if ".cmd" in name2:
+                        name2 = str(tag2.get("showname"))
+                        index2 = index2 + 1
+                        if name2.__eq__(name1):
+                            self.diffs[str(index1) + ":" + str(index2)] = \
+                                main.diff_trees(
+                                                tag1.getparent(),
+                                                tag2.getparent(),
+                                                formatter=PDMLFormatter(
+                                                    normalize=formatting.WS_BOTH,
+                                                    pretty_print=False
+                                                ),
+                                                diff_options={'F': 0.1, 'ratio_mode': 'accurate'}
+                                )
+
+        print()
+
+    def format_diff(self, key):
+        """ Pretty print diffs
+
+        Keyword arguments :
+
+        key -- the diff pair to format
+        """
+        if "diff" not in self.diffs[key]:
+            return ""
+        root = lxml.etree.fromstring(self.diffs[key])
+        tree = lxml.etree.ElementTree(root)
+        smb_tree = '\n'
+        namespace = "{http://namespaces.shoobx.com/diff}"
+        for tag in root.iter():
+            tag_name = str(tag.get("showname"))
+            tag_filter = tag_name.split(":")[0]
+            self.ignorable_fields.add(tag_filter)
+            tag_show = str(tag.get("show"))
+            path = tree.getpath(tag)
+            path = path.replace('/', '  ')
+            spaces = Counter(path)
+            tag_value = tag.get("value")
+            tag_value = ' : ' + tag_value if tag_value else ''
+            tag_name = ' ' * (spaces[' ']-2) + tag_name
+            branch = ' ' * (spaces[' ']-2) + tag_show \
+                if "None".__eq__(tag_name) else \
+                ' ' * (spaces[' '] - 2) + tag_name + tag_value
+
+            # Deal with diff:
+            diff_mention = ""
+            ignored = ""
+            attributes = tag.keys()
+
+            if tag_filter in self.ignored_fields:
+                ignored = "* "
+            if (namespace + "delete") in attributes:
+                diff_mention = " - "
+            if (namespace + "insert") in attributes:
+                diff_mention = " + "
+            update = tag.get(namespace + "update-attr")
+            if update:
+                diff_mention = "  →  "
+                update = update.split(";")
+                for to_update in update:
+                    if "showname" in to_update:
+                        diff_mention = diff_mention + to_update.replace("showname:", "")
+                    if "value" in to_update and "show" not in to_update:
+                        diff_mention = diff_mention + to_update.split(":")[1]
+            branch = ignored + branch + diff_mention + "\n"
+            smb_tree = smb_tree + branch
+        return smb_tree
+
+    def smb_diff(self, a, b):
+        """ Show the diff between two packets
+
+        Keyword arguments:
+
+        a -- list containing the name of the first packet file and the number of the packet
+
+        b -- list containing the name of the second packet file and the number of the packet
+
+        """
+
+        key = str(a[1]) + ":" + str(b[1])
+        try:
+            return self.format_diff(key)
+        except KeyError:
+            return ""
+
+
+class PDMLFormatter(formatting.XMLFormatter):
+    """ Formatter specific to PDML Documents """
+
+    XSLT = u'''<?xml version="1.0"?>
+    <xsl:stylesheet version="1.0"
+        xmlns:diff="http://namespaces.shoobx.com/diff"
+        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+
+        <xsl:template match="@diff:insert-formatting">
+            <xsl:attribute name="class">
+            <xsl:value-of select="'insert-formatting'"/>
+            </xsl:attribute>
+        </xsl:template>
+
+        <xsl:template match="diff:delete">
+            <del><xsl:apply-templates /></del>
+        </xsl:template>
+
+        <xsl:template match="diff:insert">
+            <ins><xsl:apply-templates /></ins>
+        </xsl:template>
+
+        <xsl:template match="@* | node()">
+        <xsl:copy>
+            <xsl:apply-templates select="@* | node()"/>
+        </xsl:copy>
+        </xsl:template>
+    </xsl:stylesheet>'''
+
+    def render(self, result):
+        XSLT_TEMPLATE = lxml.etree.fromstring(self.XSLT)
+        transform = lxml.etree.XSLT(XSLT_TEMPLATE)
+        result = transform(result)
+        return super(PDMLFormatter, self).render(result)
+
+
 def curses_init():
     curses.initscr()
     curses.curs_set(0)
     curses.use_default_colors()
     curses.init_pair(1, curses.COLOR_RED, -1)
     curses.init_pair(2, curses.COLOR_GREEN, -1)
+    curses.init_pair(3, curses.COLOR_BLUE, -1)
+    curses.init_pair(4, curses.COLOR_MAGENTA, -1)
+
 
 def single_view_main(stdscr, args):
     curses_init()
@@ -347,9 +569,9 @@ def single_view_main(stdscr, args):
         if tbuf.get_packet()[1] != last_packet:
             bbuf.set_data(smb_packet(*tbuf.get_packet()))
 
+
 def diff_view_main(stdscr, args):
     curses_init()
-
     H = curses.LINES
     W = curses.COLS
     th_ratio = CONF['global'].getfloat('vsplit_ratio', .5)
@@ -362,16 +584,28 @@ def diff_view_main(stdscr, args):
     rwin = curses.newwin(th, rw, 0, lw+1)
     rbuf = TraceViewer(rwin, strip_packet_no(args.fileb))
 
+
     bwin = curses.newwin(bh, W, th+1, 0)
     bbuf = BufferViewer(bwin, "", diff=True)
     resize = False
-    bbuf.set_data(smb_diff(lbuf.get_packet(), rbuf.get_packet()))
-
+    pdmldiff = PDMLDiff(args.filea, args.fileb)
+    bbuf.set_data(pdmldiff.smb_diff(lbuf.get_packet(), rbuf.get_packet()))
+    n = 0
     while True:
+        n = n + 1
         stdscr.refresh()
-        rbuf.refresh()
-        lbuf.refresh()
+        if n > 20:
+            clear(stdscr)
+            import pdb; pdb.set_trace()
+
+        if "".__eq__(bbuf.data):
+            rbuf.refresh()
+            lbuf.refresh()
+        else:
+            rbuf.refresh()
+            lbuf.refresh()
         bbuf.refresh()
+
         # y, x, ch, length
         stdscr.vline(0, lw, 0, th)
         stdscr.hline(th, 0, 0, W)
@@ -415,6 +649,10 @@ def diff_view_main(stdscr, args):
         elif k == 'KEY_RESIZE':
             resize = True
 
+        elif k == 'a':
+            for element in pdmldiff.getignorable_fields():
+                if element in bbuf.getselected():
+                    pdmldiff.setignored_fields(element)
 
         if resize:
             H, W = stdscr.getmaxyx()
@@ -426,9 +664,22 @@ def diff_view_main(stdscr, args):
             bwin.mvwin(th+1, 0)
             resize = False
 
-
         if lbuf.get_packet()[1] != last_lpacket or rbuf.get_packet()[1] != last_rpacket:
-            bbuf.set_data(smb_diff(lbuf.get_packet(), rbuf.get_packet()))
+            bbuf.set_data(pdmldiff.smb_diff(lbuf.get_packet(), rbuf.get_packet()))
+
+
+def clear(stdscr):
+    """ Disable curses while debugging
+
+    Keyword arguments:
+
+    stdscr -- the window object representing the entire screen
+    """
+    curses.nocbreak()
+    stdscr.keypad(0)
+    curses.echo()
+    curses.endwin()
+
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description='compare smb packets')
