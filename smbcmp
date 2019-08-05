@@ -39,6 +39,7 @@ KEY = {}
 CONF = configparser.ConfigParser()
 CRYPTO_KEY = {}
 
+
 def load_config(fn):
     CONF.read(fn)
 
