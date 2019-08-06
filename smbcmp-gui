@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+# GUI for smbcmp
+#
+# Copyright (C) 2019 Mairo Paul Rufus <akoudanilo@gmail.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import wx
+import wx.grid as gridlib
+from wx.lib import wordwrap
+
+import smbcmp
+
+
+class ScrollSync(object):
+    def __init__(self, panel1, panel2):
+        self.panel1 = panel1
+        self.panel2 = panel2
+        self.panel1.grid.Bind(wx.EVT_SCROLLWIN, self.onScrollWin1)
+        self.panel2.grid.Bind(wx.EVT_SCROLLWIN, self.onScrollWin2)
+
+    def onScrollWin1(self, event):
+        if event.Orientation == wx.SB_HORIZONTAL:
+            self.panel2.grid.Scroll(event.Position, -1)
+        else:
+            self.panel2.grid.Scroll(-1, event.Position)
+        event.Skip()
+
+    def onScrollWin2(self, event):
+        if event.Orientation == wx.SB_HORIZONTAL:
+            self.panel1.grid.Scroll(event.Position, -1)
+        else:
+            self.panel1.grid.Scroll(-1, event.Position)
+        event.Skip()
+
+
+class GridPanel(wx.Panel):
+    """"""
+    def __init__(self, parent):
+        """Constructor"""
+        wx.Panel.__init__(self, parent)
+        self.grid = gridlib.Grid(self, style=wx.BORDER_SUNKEN)
+        self.grid.EnableEditing(False)
+        self.grid.CreateGrid(250,1)
+        self.grid.SetRowLabelSize(0)
+        self.grid.SetColLabelSize(0)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(self.grid, 1, wx.EXPAND)
+        self.SetSizer(sizer)
+
+
+class MainPanel(wx.Panel):
+    """"""
+    def __init__(self, parent):
+        """Constructor"""
+        wx.Panel.__init__(self, parent)
+        split = wx.SplitterWindow(self)
+        panelOne = GridPanel(split)
+        panelTwo = GridPanel(split)
+        ScrollSync(panelOne, panelTwo)
+        split.SplitVertically(panelOne, panelTwo)
+        split.SetSashGravity(0.5)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(split, 1, wx.EXPAND)
+        self.SetSizer(sizer)
+
+
+class MainFrame(wx.Frame):
+    """ Main frame of the program
+    """
+    def __init__(self):
+        """Constructor"""
+        wx.Frame.__init__(self, None, title="Sync Grids",
+                          size=(800, 400))
+        panel = MainPanel(self)
+        self.Show()
+
+    def onAboutDlg(self, event):
+        info = wx.AboutDialogInfo()
+        info.Name = "My About Box"
+        info.Version = "0.0.1 Beta"
+        info.Copyright = "(C) 2016 Python Geeks Everywhere"
+        info.Description = wordwrap(f"This is an example application"
+                                    f"that shows how to create different"
+                                    f"kinds of About Boxes"
+                                    f"using wxPython!",
+                                    350, wx.ClientDC(self.panel))
+        info.WebSite = ("http://www.pythonlibrary.org", "My Home Page")
+        info.Developers = ["Mike Driscoll"]
+        info.License = wordwrap("Completely and totally open source!", 500,
+                                wx.ClientDC(self.panel))
+        wx.AboutBox(info)
+
+
+if __name__ == "__main__":
+    app = wx.App(False)
+    frame = MainFrame()
+    app.MainLoop()
