@@ -16,94 +16,271 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import subprocess
+from subprocess import SubprocessError
+import os
+import configparser
+import re
+import functools
+
 import wx
-import wx.grid as gridlib
+import wx.adv
 from wx.lib import wordwrap
 
 import smbcmp
 
 
-class ScrollSync(object):
-    def __init__(self, panel1, panel2):
-        self.panel1 = panel1
-        self.panel2 = panel2
-        self.panel1.grid.Bind(wx.EVT_SCROLLWIN, self.onScrollWin1)
-        self.panel2.grid.Bind(wx.EVT_SCROLLWIN, self.onScrollWin2)
-
-    def onScrollWin1(self, event):
-        if event.Orientation == wx.SB_HORIZONTAL:
-            self.panel2.grid.Scroll(event.Position, -1)
-        else:
-            self.panel2.grid.Scroll(-1, event.Position)
-        event.Skip()
-
-    def onScrollWin2(self, event):
-        if event.Orientation == wx.SB_HORIZONTAL:
-            self.panel1.grid.Scroll(event.Position, -1)
-        else:
-            self.panel1.grid.Scroll(-1, event.Position)
-        event.Skip()
+TSHARK_FILTER_FLAG = None
+DEFAULT_CONFIG = os.path.expanduser("~/.smbcmp")
+KEY = {}
+CONF = configparser.ConfigParser()
 
 
-class GridPanel(wx.Panel):
-    """"""
-    def __init__(self, parent):
-        """Constructor"""
-        wx.Panel.__init__(self, parent)
-        self.grid = gridlib.Grid(self, style=wx.BORDER_SUNKEN)
-        self.grid.EnableEditing(False)
-        self.grid.CreateGrid(250,1)
-        self.grid.SetRowLabelSize(0)
-        self.grid.SetColLabelSize(0)
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(self.grid, 1, wx.EXPAND)
-        self.SetSizer(sizer)
+def load_config_():
+    CONF.read(DEFAULT_CONFIG)
+
+    def k(name, default):
+        KEY[name] = CONF['global'].get('key_'+name, default)
+    k('lwin_next', 'd')
+    k('lwin_prev', 'f')
+    k('rwin_next', 'j')
+    k('rwin_prev', 'k')
+    k('top_next', 'KEY_DOWN')
+    k('top_prev', 'KEY_UP')
+    k('bwin_next', 'b')
+    k('bwin_prev', 'n')
+    k('vsplit_up', 'KEY_PPAGE')
+    k('vsplit_down', 'KEY_NPAGE')
+    k('toggle_ignore', 'a')
 
 
-class MainPanel(wx.Panel):
-    """"""
-    def __init__(self, parent):
-        """Constructor"""
-        wx.Panel.__init__(self, parent)
-        split = wx.SplitterWindow(self)
-        panelOne = GridPanel(split)
-        panelTwo = GridPanel(split)
-        ScrollSync(panelOne, panelTwo)
-        split.SplitVertically(panelOne, panelTwo)
-        split.SetSashGravity(0.5)
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(split, 1, wx.EXPAND)
-        self.SetSizer(sizer)
+def tshark_(*args):
+    binpath = CONF['global'].get('tshark_path', 'tshark')
+    return [binpath] + list(args)
+
+
+@functools.lru_cache(maxsize=128)
+def smb_summaries_(pcap):
+    cmd = tshark_()
+    cmd += ['-r', pcap, TSHARK_FILTER_FLAG, '!browser && (smb||smb2)']
+    out = subprocess.check_output(cmd).decode('utf-8')
+    pkts = []
+    for line in out.split('\n'):
+        m = re.match(r'''\s*(\d+).+?SMB2?\s*\d+\s*(.+)''', line)
+        if m:
+            pkts.append(m.group(2))
+    return pkts
+
+
+def wireshark_checks_():
+    try:
+        out = subprocess.check_output(tshark_('-h')).decode('utf-8')
+    except SubprocessError:
+        print("Can't run tshark, check if installed properly")
+        raise
+
+    if 'wireshark' not in out:
+        raise Exception("Unexpected tshark out, check if installed properly")
+    global TSHARK_FILTER_FLAG
+    if '-Y' in out:
+        TSHARK_FILTER_FLAG = '-Y'
+    else:
+        TSHARK_FILTER_FLAG = '-R'
+
+
+class TracePanel(wx.Panel):
+    """ Panel holding the summaries of the packets """
+    def __init__(self, *args, **kwds):
+        kwds["style"] = kwds.get("style", 0)
+        wx.Panel.__init__(self, *args, **kwds)
+        data = ["summary"]
+
+        self.buffer = wx.ListBox(self, wx.ID_ANY, choices=data)
+
+        self.__set_properties()
+        self.__do_layout()
+
+    def __set_properties(self):
+        pass
+
+    def __do_layout(self):
+        sizer_1 = wx.BoxSizer(wx.HORIZONTAL)
+        sizer_1.Add(self.buffer, 1, wx.ALL | wx.EXPAND, 5)
+        self.SetSizer(sizer_1)
+        sizer_1.Fit(self)
+        self.Layout()
+
+    def set_data(self, file_path):
+        """ Fill the Panel with smb summaries """
+        self.data = smb_summaries_(file_path)
+        self.buffer.Clear()
+        self.buffer.InsertItems(items=self.data, pos=0)
+
+    @property
+    def data(self):
+        return self._data
+
+    @data.setter
+    def data(self, value):
+        self._data = value
+
+    def permute_data(self, panel):
+        temp = self.data
+
+        self.data = panel.data
+        self.buffer.Clear()
+        self.buffer.InsertItems(items=self.data, pos=0)
+
+        panel.data = temp
+        panel.buffer.Clear()
+        panel.buffer.InsertItems(items=panel.data, pos=0)
 
 
 class MainFrame(wx.Frame):
-    """ Main frame of the program
-    """
-    def __init__(self):
-        """Constructor"""
-        wx.Frame.__init__(self, None, title="Sync Grids",
-                          size=(800, 400))
-        panel = MainPanel(self)
-        self.Show()
+    def __init__(self, *args, **kwds):
+        kwds["style"] = kwds.get("style", 0) | wx.DEFAULT_FRAME_STYLE
+        wx.Frame.__init__(self, *args, **kwds)
 
-    def onAboutDlg(self, event):
-        info = wx.AboutDialogInfo()
-        info.Name = "My About Box"
+        load_config_()
+        wireshark_checks_()
+
+        self.lpanel = TracePanel(self, wx.ID_ANY)
+        self.rpanel = TracePanel(self, wx.ID_ANY)
+
+        data = ["diffs"]
+        self.bbuffer = wx.ListBox(self, wx.ID_ANY,
+                                  choices=data,
+                                  style=wx.LB_MULTIPLE | wx.LB_NEEDED_SB)
+
+        """
+        entries = [wx.AcceleratorEntry() for i in range(2)]
+
+        entries[0].Set(wx.ACCEL_CTRL, ord('X'), wx.ID_EXIT)
+        entries[1].Set(wx.ACCEL_NORMAL, wx.WXK_DELETE, wx.ID_CUT)
+
+        accel = wx.AcceleratorTable(entries)
+        self.SetAcceleratorTable(accel)
+        """
+
+        self.__set_properties()
+        self.__do_layout()
+        self.create_menu()
+
+    def create_menu(self):
+        menu_bar = wx.MenuBar()
+
+        file_menu = wx.Menu()
+        open_file1_menu_item = file_menu.Append(
+            wx.ID_ANY, 'Open Capture &1',
+            'Open the first capture file'
+        )
+        open_file2_menu_item = file_menu.Append(
+            wx.ID_ANY, 'Open Capture &2',
+            'Open the second capture file'
+        )
+        permute_menu_item = file_menu.Append(
+            wx.ID_ANY, '&Permute',
+            'Permute the two panels')
+        close_menu_item = file_menu.Append(
+            wx.ID_ANY, "&Close",
+            "Close the application")
+        menu_bar.Append(file_menu, '&File')
+        self.Bind(
+            event=wx.EVT_MENU,
+            handler=self.on_open_file1,
+            source=open_file1_menu_item,
+        )
+        self.Bind(
+            event=wx.EVT_MENU,
+            handler=self.on_open_file2,
+            source=open_file2_menu_item)
+        self.Bind(
+            event=wx.EVT_MENU,
+            handler=self.on_permute,
+            source=permute_menu_item)
+        self.Bind(
+            event=wx.EVT_MENU,
+            handler=self.on_close,
+            source=close_menu_item
+        )
+
+        help_menu = wx.Menu()
+        about_menu_item = help_menu.Append(
+            wx.ID_ANY, "&About",
+            "Open the about Box")
+        menu_bar.Append(help_menu, '&Help')
+
+        self.Bind(
+            event=wx.EVT_MENU,
+            handler=self.on_about,
+            source=about_menu_item)
+
+        self.SetMenuBar(menu_bar)
+
+    def on_open_file1(self, event):
+        title = "Choose a capture file :"
+        dlg = wx.FileDialog(self,
+                            message=title,
+                            defaultDir="~",
+                            style=wx.DD_DEFAULT_STYLE)
+        if dlg.ShowModal() == wx.ID_OK:
+            self.lpanel.set_data(dlg.GetPath())
+        dlg.Destroy()
+
+    def on_open_file2(self, event):
+        title = "Choose a capture file :"
+        dlg = wx.FileDialog(self,
+                            message=title,
+                            defaultDir="~",
+                            style=wx.DD_DEFAULT_STYLE)
+        if dlg.ShowModal() == wx.ID_OK:
+            self.rpanel.set_data(dlg.GetPath())
+        dlg.Destroy()
+
+    def on_permute(self, event):
+        self.lpanel.permute_data(self.rpanel)
+        pass
+
+    def on_close(self, event):
+        self.Close()
+
+    def on_about(self, event):
+        info = wx.adv.AboutDialogInfo()
+        info.Name = "About"
         info.Version = "0.0.1 Beta"
-        info.Copyright = "(C) 2016 Python Geeks Everywhere"
-        info.Description = wordwrap(f"This is an example application"
-                                    f"that shows how to create different"
-                                    f"kinds of About Boxes"
-                                    f"using wxPython!",
-                                    350, wx.ClientDC(self.panel))
-        info.WebSite = ("http://www.pythonlibrary.org", "My Home Page")
-        info.Developers = ["Mike Driscoll"]
-        info.License = wordwrap("Completely and totally open source!", 500,
-                                wx.ClientDC(self.panel))
-        wx.AboutBox(info)
+        info.Copyright = "(C) 2019 Mairo Paul Rufus akoudanilo@gmail.com"
+        info.Description = f"This is a frontend GUI for smbcmp"
+        f"For navigation you can use its default shortcuts"
+        info.WebSite = ("https://www.github.com/aaptel/smbcmp", "Project homepage")
+        info.Developers = ["RMPR"]
+        info.License = f"GNU General Public License V3"
+        # Show the wx.AboutBox
+        wx.adv.AboutBox(info)
+
+    def __set_properties(self):
+        self.SetTitle("smbcmp")
+
+    def __do_layout(self):
+        main_sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer_top = wx.BoxSizer(wx.HORIZONTAL)
+        sizer_top.Add(self.lpanel, 1, wx.EXPAND, 0)
+        sizer_top.Add(self.rpanel, 1, wx.EXPAND, 0)
+        main_sizer.Add(sizer_top, 1, wx.EXPAND, 0)
+        main_sizer.Add(self.bbuffer, 1, wx.ALL | wx.EXPAND, 15)
+        self.SetSizer(main_sizer)
+        main_sizer.Fit(self)
+        self.Layout()
+
+
+class Smbcmp(wx.App):
+    def OnInit(self):
+        self.frame = MainFrame(None, wx.ID_ANY, "")
+        self.SetTopWindow(self.frame)
+        self.frame.Show()
+        return True
 
 
 if __name__ == "__main__":
-    app = wx.App(False)
-    frame = MainFrame()
+    app = Smbcmp(0)
     app.MainLoop()
+
