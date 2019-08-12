@@ -25,7 +25,6 @@ import functools
 
 import wx
 import wx.adv
-from wx.lib import wordwrap
 
 import smbcmp
 
@@ -64,12 +63,14 @@ def smb_summaries_(pcap):
     cmd = tshark_()
     cmd += ['-r', pcap, TSHARK_FILTER_FLAG, '!browser && (smb||smb2)']
     out = subprocess.check_output(cmd).decode('utf-8')
+    nos = []
     pkts = []
     for line in out.split('\n'):
         m = re.match(r'''\s*(\d+).+?SMB2?\s*\d+\s*(.+)''', line)
         if m:
+            nos.append(int(m.group(1)))
             pkts.append(m.group(2))
-    return pkts
+    return nos, pkts
 
 
 def wireshark_checks_():
@@ -96,7 +97,8 @@ class TracePanel(wx.Panel):
         data = ["summary"]
 
         self.buffer = wx.ListBox(self, wx.ID_ANY, choices=data)
-
+        self.buffer.SetSelection(0)
+        self.debug = []
         self.__set_properties()
         self.__do_layout()
 
@@ -112,9 +114,20 @@ class TracePanel(wx.Panel):
 
     def set_data(self, file_path):
         """ Fill the Panel with smb summaries """
-        self.data = smb_summaries_(file_path)
+        self.cap = file_path
+        self.nos, self.data = smb_summaries_(self.cap)
+        self.l = len(self.data)
         self.buffer.Clear()
         self.buffer.InsertItems(items=self.data, pos=0)
+        self.buffer.SetSelection(0)
+
+    @property
+    def cap(self):
+        return self._cap
+
+    @cap.setter
+    def cap(self, value):
+        self._cap = value
 
     @property
     def data(self):
@@ -135,9 +148,28 @@ class TracePanel(wx.Panel):
         panel.buffer.Clear()
         panel.buffer.InsertItems(items=panel.data, pos=0)
 
+    def move(self, direction):
+        selected = self.buffer.GetSelection()
+        if direction + 1:   # We are going to the bottom
+            self.buffer.SetSelection((selected + 1) % self.l)
+        elif selected > 0:
+            self.buffer.SetSelection(selected - 1)
+
+    def select_paquet(self, panel):
+        selected_item_1 = panel.buffer.GetSelection()
+        selected_item_2 = self.buffer.GetSelection()
+        if selected_item_2 != wx.NOT_FOUND:
+            pkt_a = (panel.cap, panel.nos[selected_item_1])
+            pkt_b = (self.cap, self.nos[selected_item_2])
+            diffs = smbcmp.PDMLDiff(pkt_a, pkt_b)
+            out = [diffs.smb_diff().get_text()]
+            return out
+        return "Tell me that we arrive here at least"
+
 
 class MainFrame(wx.Frame):
     def __init__(self, *args, **kwds):
+        self.test = []
         kwds["style"] = kwds.get("style", 0) | wx.DEFAULT_FRAME_STYLE
         wx.Frame.__init__(self, *args, **kwds)
 
@@ -147,24 +179,65 @@ class MainFrame(wx.Frame):
         self.lpanel = TracePanel(self, wx.ID_ANY)
         self.rpanel = TracePanel(self, wx.ID_ANY)
 
-        data = ["diffs"]
+        data = ["diffs", "diffs"]
+        self.l = len(data)
         self.bbuffer = wx.ListBox(self, wx.ID_ANY,
                                   choices=data,
-                                  style=wx.LB_MULTIPLE | wx.LB_NEEDED_SB)
-
-        """
-        entries = [wx.AcceleratorEntry() for i in range(2)]
-
-        entries[0].Set(wx.ACCEL_CTRL, ord('X'), wx.ID_EXIT)
-        entries[1].Set(wx.ACCEL_NORMAL, wx.WXK_DELETE, wx.ID_CUT)
-
-        accel = wx.AcceleratorTable(entries)
-        self.SetAcceleratorTable(accel)
-        """
-
+                                  style=wx.LB_SINGLE | wx.LB_NEEDED_SB)
+        self.bbuffer.SetSelection(0)
         self.__set_properties()
         self.__do_layout()
         self.create_menu()
+
+        @functools.lru_cache(maxsize=128)
+        def new_smb_packet(pcap, no, pdml=False):
+            cmd = tshark_()
+            cmd += ['-r', pcap, TSHARK_FILTER_FLAG, f"frame.number == {no}", '-V']
+            cmd += ['-Tpdml']
+            return subprocess.check_output(cmd).decode('utf-8')
+
+        # Monkey patch
+        smbcmp.smb_packet = new_smb_packet
+
+        self.Bind(
+                    event=wx.EVT_LISTBOX,
+                    handler=self.on_selected,
+                    source=self.bbuffer)
+
+        self.rpanel.buffer.Bind(wx.EVT_KEY_DOWN, self.on_key_press)
+        self.lpanel.buffer.Bind(wx.EVT_KEY_DOWN, self.on_key_press)
+        self.bbuffer.Bind(wx.EVT_KEY_DOWN, self.on_key_press)
+
+    def on_key_press(self, event):
+        keycode = event.GetKeyCode()
+
+        if keycode == wx.WXK_DOWN:
+            self.rpanel.move(+1)
+            self.lpanel.move(+1)
+        elif keycode == wx.WXK_UP:
+            self.rpanel.move(-1)
+            self.lpanel.move(-1)
+
+        elif keycode == ord("D"):
+            self.lpanel.move(+1)
+        elif keycode == ord("F"):
+            self.lpanel.move(-1)
+            event.Skip()
+
+        elif keycode == ord("J"):
+            self.rpanel.move(+1)
+        elif keycode == ord("K"):
+            self.rpanel.move(-1)
+
+        elif keycode == ord("B"):
+            self.bbuffer.SetFocus()
+            self.bbuffer.Select((self.bbuffer.GetSelection() + 1) % self.l)
+        elif keycode == ord("N"):
+            self.bbuffer.SetFocus()
+            if self.bbuffer.GetSelection() > 0:
+                self.bbuffer.Select(self.bbuffer.GetSelection() - 1)
+        else:
+            event.Skip()
 
     def create_menu(self):
         menu_bar = wx.MenuBar()
@@ -239,7 +312,6 @@ class MainFrame(wx.Frame):
 
     def on_permute(self, event):
         self.lpanel.permute_data(self.rpanel)
-        pass
 
     def on_close(self, event):
         self.Close()
@@ -251,11 +323,15 @@ class MainFrame(wx.Frame):
         info.Copyright = "(C) 2019 Mairo Paul Rufus akoudanilo@gmail.com"
         info.Description = f"This is a frontend GUI for smbcmp"
         f"For navigation you can use its default shortcuts"
-        info.WebSite = ("https://www.github.com/aaptel/smbcmp", "Project homepage")
+        info.WebSite = ("https://www.github.com/aaptel/smbcmp",
+                        "Project homepage")
         info.Developers = ["RMPR"]
         info.License = f"GNU General Public License V3"
         # Show the wx.AboutBox
         wx.adv.AboutBox(info)
+
+    def on_selected(self, event):
+        pass
 
     def __set_properties(self):
         self.SetTitle("smbcmp")
