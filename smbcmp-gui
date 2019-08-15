@@ -95,7 +95,9 @@ class TracePanel(wx.Panel):
         kwds["style"] = kwds.get("style", 0)
         wx.Panel.__init__(self, *args, **kwds)
         data = ["summary"]
-
+        self.nb = 1
+        self.cap = ""
+        self.nos = [1]
         self.buffer = wx.ListBox(self, wx.ID_ANY, choices=data)
         self.buffer.SetSelection(0)
         self.debug = []
@@ -116,7 +118,7 @@ class TracePanel(wx.Panel):
         """ Fill the Panel with smb summaries """
         self.cap = file_path
         self.nos, self.data = smb_summaries_(self.cap)
-        self.l = len(self.data)
+        self.nb = len(self.data)
         self.buffer.Clear()
         self.buffer.InsertItems(items=self.data, pos=0)
         self.buffer.SetSelection(0)
@@ -150,26 +152,14 @@ class TracePanel(wx.Panel):
 
     def move(self, direction):
         selected = self.buffer.GetSelection()
-        if direction + 1:   # We are going to the bottom
-            self.buffer.SetSelection((selected + 1) % self.l)
+        if direction + 1:   # From top to bottom
+            self.buffer.SetSelection((selected + 1) % self.nb)
         elif selected > 0:
             self.buffer.SetSelection(selected - 1)
-
-    def select_paquet(self, panel):
-        selected_item_1 = panel.buffer.GetSelection()
-        selected_item_2 = self.buffer.GetSelection()
-        if selected_item_2 != wx.NOT_FOUND:
-            pkt_a = (panel.cap, panel.nos[selected_item_1])
-            pkt_b = (self.cap, self.nos[selected_item_2])
-            diffs = smbcmp.PDMLDiff(pkt_a, pkt_b)
-            out = [diffs.smb_diff().get_text()]
-            return out
-        return "Tell me that we arrive here at least"
 
 
 class MainFrame(wx.Frame):
     def __init__(self, *args, **kwds):
-        self.test = []
         kwds["style"] = kwds.get("style", 0) | wx.DEFAULT_FRAME_STYLE
         wx.Frame.__init__(self, *args, **kwds)
 
@@ -179,12 +169,13 @@ class MainFrame(wx.Frame):
         self.lpanel = TracePanel(self, wx.ID_ANY)
         self.rpanel = TracePanel(self, wx.ID_ANY)
 
-        data = ["diffs", "diffs"]
-        self.l = len(data)
+        self.data = ["diffs"]
+        self.nb = len(self.data)
+        self.diff_method = 1   # difflib
         self.bbuffer = wx.ListBox(self, wx.ID_ANY,
-                                  choices=data,
-                                  style=wx.LB_SINGLE | wx.LB_NEEDED_SB)
+                                  choices=self.data)
         self.bbuffer.SetSelection(0)
+        self.selection = 0
         self.__set_properties()
         self.__do_layout()
         self.create_menu()
@@ -192,17 +183,17 @@ class MainFrame(wx.Frame):
         @functools.lru_cache(maxsize=128)
         def new_smb_packet(pcap, no, pdml=False):
             cmd = tshark_()
-            cmd += ['-r', pcap, TSHARK_FILTER_FLAG, f"frame.number == {no}", '-V']
-            cmd += ['-Tpdml']
-            return subprocess.check_output(cmd).decode('utf-8')
+            cmd += ['-r', pcap, TSHARK_FILTER_FLAG, 'frame.number == %d' % no, '-V']
+            if pdml:
+                cmd += ['-Tpdml']
+                return subprocess.check_output(cmd).decode('utf-8')
+            else:
+                out = subprocess.check_output(cmd).decode('utf-8')
+                out = re.sub(r'^[\s\S]+?\nSMB', 'SMB', out, re.S)
+                return out
 
         # Monkey patch
         smbcmp.smb_packet = new_smb_packet
-
-        self.Bind(
-                    event=wx.EVT_LISTBOX,
-                    handler=self.on_selected,
-                    source=self.bbuffer)
 
         self.rpanel.buffer.Bind(wx.EVT_KEY_DOWN, self.on_key_press)
         self.lpanel.buffer.Bind(wx.EVT_KEY_DOWN, self.on_key_press)
@@ -210,6 +201,7 @@ class MainFrame(wx.Frame):
 
     def on_key_press(self, event):
         keycode = event.GetKeyCode()
+        self.selection = self.bbuffer.GetSelection()
 
         if keycode == wx.WXK_DOWN:
             self.rpanel.move(+1)
@@ -230,14 +222,44 @@ class MainFrame(wx.Frame):
             self.rpanel.move(-1)
 
         elif keycode == ord("B"):
-            self.bbuffer.SetFocus()
-            self.bbuffer.Select((self.bbuffer.GetSelection() + 1) % self.l)
+            self.selection += 1
+            self.bbuffer.SetSelection(self.selection % self.nb)
         elif keycode == ord("N"):
-            self.bbuffer.SetFocus()
             if self.bbuffer.GetSelection() > 0:
-                self.bbuffer.Select(self.bbuffer.GetSelection() - 1)
+                self.selection -= 1
+                self.bbuffer.SetSelection(self.selection)
         else:
             event.Skip()
+
+        if self.lpanel.cap and self.rpanel.cap:
+            selected_item_1 = self.lpanel.buffer.GetSelection()
+            selected_item_2 = self.rpanel.buffer.GetSelection()
+            self.data = self.print_diffs(selected_item_1,
+                                         selected_item_2,
+                                         self.diff_method)
+            self.nb = len(self.data)
+            self.bbuffer.Clear()
+            self.bbuffer.InsertItems(self.data, 0)
+            self.bbuffer.SetSelection(self.selection)
+
+    @functools.lru_cache(maxsize=128)
+    def print_diffs(self, a, b, method=1):
+        """ print diffs
+
+        Keyword Arguments:
+
+        a -- number of the first paquet
+        b -- number of the second paquet
+        method -- type of diff (1 for difflib, 2 for pdml)
+        """
+        pkt_a = (self.lpanel.cap, self.lpanel.nos[a])
+        pkt_b = (self.rpanel.cap, self.rpanel.nos[b])
+        if method == 1:
+            return smbcmp.smb_diff(pkt_a, pkt_b, gui=True)
+        else:
+            diffs = smbcmp.PDMLDiff(pkt_a, pkt_b)
+            out = diffs.smb_diff().get_text("\n").split("\n")
+            return out
 
     def create_menu(self):
         menu_bar = wx.MenuBar()
@@ -277,18 +299,34 @@ class MainFrame(wx.Frame):
             source=close_menu_item
         )
 
+        options_menu = wx.Menu()
+        engine_menu_item = options_menu.Append(
+            wx.ID_ANY, "&Engine",
+            "Configure the application")
+        menu_bar.Append(options_menu, '&Options')
+        self.Bind(
+            event=wx.EVT_MENU,
+            handler=self.on_engine,
+            source=engine_menu_item)
+
         help_menu = wx.Menu()
         about_menu_item = help_menu.Append(
             wx.ID_ANY, "&About",
             "Open the about Box")
         menu_bar.Append(help_menu, '&Help')
-
         self.Bind(
             event=wx.EVT_MENU,
             handler=self.on_about,
             source=about_menu_item)
 
         self.SetMenuBar(menu_bar)
+
+    def on_engine(self, event):
+        dlg = ChooseEngineDialog(None,
+                                 title='Choose a diffs engine')
+        dlg.ShowModal()
+        self.diff_method = dlg.choice
+        dlg.Destroy()
 
     def on_open_file1(self, event):
         title = "Choose a capture file :"
@@ -330,9 +368,6 @@ class MainFrame(wx.Frame):
         # Show the wx.AboutBox
         wx.adv.AboutBox(info)
 
-    def on_selected(self, event):
-        pass
-
     def __set_properties(self):
         self.SetTitle("smbcmp")
 
@@ -346,6 +381,63 @@ class MainFrame(wx.Frame):
         self.SetSizer(main_sizer)
         main_sizer.Fit(self)
         self.Layout()
+
+
+class ChooseEngineDialog(wx.Dialog):
+
+    def __init__(self, *args, **kwargs):
+        super(ChooseEngineDialog, self).__init__(*args, **kwargs)
+
+        self.choice = 1
+        self.InitUI()
+        self.SetSize((250, 200))
+        self.SetTitle("Choose Diffs Engine")
+
+    def InitUI(self):
+        pnl = wx.Panel(self)
+        vbox = wx.BoxSizer(wx.VERTICAL)
+
+        sb = wx.StaticBox(pnl, label='Engines')
+        sbs = wx.StaticBoxSizer(sb, orient=wx.VERTICAL)
+
+        self.radio = wx.RadioButton(pnl, label='Difflib', style=wx.RB_GROUP)
+        self.radio2 = wx.RadioButton(pnl, label='Pdml')
+        sbs.Add(self.radio)
+        sbs.Add(self.radio2)
+
+        pnl.SetSizer(sbs)
+
+        hbox2 = wx.BoxSizer(wx.HORIZONTAL)
+        okButton = wx.Button(self, label='Ok')
+        closeButton = wx.Button(self, label='Close')
+        hbox2.Add(okButton)
+        hbox2.Add(closeButton, flag=wx.LEFT, border=5)
+
+        vbox.Add(pnl, proportion=1, flag=wx.ALL | wx.EXPAND, border=5)
+        vbox.Add(hbox2, flag=wx.ALIGN_CENTER | wx.TOP | wx.BOTTOM, border=10)
+
+        self.SetSizer(vbox)
+
+        okButton.Bind(wx.EVT_BUTTON, self.on_btn_ok)
+        closeButton.Bind(wx.EVT_BUTTON, self.on_close)
+
+    def on_btn_ok(self, event):
+        if self.radio.GetValue():
+            self.choice = 1
+        elif self.radio2.GetValue():
+            self.choice = 2
+        self.Destroy()
+
+    def on_close(self, e):
+        self.Destroy()
+
+    @property
+    def choice(self):
+        return self._choice
+
+    @choice.setter
+    def choice(self, value):
+        self._choice = value
 
 
 class Smbcmp(wx.App):
