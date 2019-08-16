@@ -25,6 +25,7 @@ import functools
 
 import wx
 import wx.adv
+import wx.lib.mixins.listctrl
 
 import smbcmp
 
@@ -33,6 +34,8 @@ TSHARK_FILTER_FLAG = None
 DEFAULT_CONFIG = os.path.expanduser("~/.smbcmp")
 KEY = {}
 CONF = configparser.ConfigParser()
+DIFFLIB = 1
+PDML = 2
 
 
 def load_config_():
@@ -162,7 +165,6 @@ class MainFrame(wx.Frame):
     def __init__(self, *args, **kwds):
         kwds["style"] = kwds.get("style", 0) | wx.DEFAULT_FRAME_STYLE
         wx.Frame.__init__(self, *args, **kwds)
-
         load_config_()
         wireshark_checks_()
 
@@ -170,12 +172,9 @@ class MainFrame(wx.Frame):
         self.rpanel = TracePanel(self, wx.ID_ANY)
 
         self.data = ["diffs"]
-        self.nb = len(self.data)
-        self.diff_method = 1   # difflib
-        self.bbuffer = wx.ListBox(self, wx.ID_ANY,
-                                  choices=self.data)
-        self.bbuffer.SetSelection(0)
-        self.selection = 0
+        self.bbuffer = DiffsBox(self, wx.ID_ANY,
+                                style=wx.LC_REPORT | wx.LC_SINGLE_SEL |
+                                wx.LC_ALIGN_LEFT)
         self.__set_properties()
         self.__do_layout()
         self.create_menu()
@@ -201,65 +200,66 @@ class MainFrame(wx.Frame):
 
     def on_key_press(self, event):
         keycode = event.GetKeyCode()
-        self.selection = self.bbuffer.GetSelection()
 
         if keycode == wx.WXK_DOWN:
             self.rpanel.move(+1)
             self.lpanel.move(+1)
+            self.refresh()
         elif keycode == wx.WXK_UP:
             self.rpanel.move(-1)
             self.lpanel.move(-1)
+            self.refresh()
 
         elif keycode == ord("D"):
             self.lpanel.move(+1)
+            self.refresh()
         elif keycode == ord("F"):
             self.lpanel.move(-1)
+            self.refresh()
             event.Skip()
 
         elif keycode == ord("J"):
             self.rpanel.move(+1)
+            self.refresh()
         elif keycode == ord("K"):
             self.rpanel.move(-1)
+            self.refresh()
 
         elif keycode == ord("B"):
-            self.selection += 1
-            self.bbuffer.SetSelection(self.selection % self.nb)
+            self.bbuffer.move(+1)
         elif keycode == ord("N"):
-            if self.bbuffer.GetSelection() > 0:
-                self.selection -= 1
-                self.bbuffer.SetSelection(self.selection)
+            self.bbuffer.move(-1)
         else:
             event.Skip()
 
+    def refresh(self):
         if self.lpanel.cap and self.rpanel.cap:
             selected_item_1 = self.lpanel.buffer.GetSelection()
             selected_item_2 = self.rpanel.buffer.GetSelection()
-            self.data = self.print_diffs(selected_item_1,
-                                         selected_item_2,
-                                         self.diff_method)
-            self.nb = len(self.data)
-            self.bbuffer.Clear()
-            self.bbuffer.InsertItems(self.data, 0)
-            self.bbuffer.SetSelection(self.selection)
+            self.bbuffer.refresh(self.print_diffs(selected_item_1,
+                                                  selected_item_2,
+                                                  self.bbuffer.diff_method))
 
     @functools.lru_cache(maxsize=128)
-    def print_diffs(self, a, b, method=1):
+    def print_diffs(self, a, b, method=DIFFLIB):
         """ print diffs
 
         Keyword Arguments:
 
         a -- number of the first paquet
         b -- number of the second paquet
-        method -- type of diff (1 for difflib, 2 for pdml)
+        method -- type of diff
         """
         pkt_a = (self.lpanel.cap, self.lpanel.nos[a])
         pkt_b = (self.rpanel.cap, self.rpanel.nos[b])
-        if method == 1:
+        if method == DIFFLIB:
             return smbcmp.smb_diff(pkt_a, pkt_b, gui=True)
-        else:
+        elif method == PDML:
             diffs = smbcmp.PDMLDiff(pkt_a, pkt_b)
             out = diffs.smb_diff().get_text("\n").split("\n")
             return out
+        else:
+            return "Unknown method"
 
     def create_menu(self):
         menu_bar = wx.MenuBar()
@@ -325,7 +325,7 @@ class MainFrame(wx.Frame):
         dlg = ChooseEngineDialog(None,
                                  title='Choose a diffs engine')
         dlg.ShowModal()
-        self.diff_method = dlg.choice
+        self.bbuffer.diff_method = dlg.choice
         dlg.Destroy()
 
     def on_open_file1(self, event):
@@ -383,12 +383,68 @@ class MainFrame(wx.Frame):
         self.Layout()
 
 
+class DiffsBox(wx.ListCtrl):
+    def __init__(self, *args, **kwargs):
+        super(DiffsBox, self).__init__(*args, **kwargs)
+        self.data = ["diffs"]
+        self.selection = 0
+        self.nb = len(self.data)
+        self.diff_method = DIFFLIB
+        self._set_title()
+
+    def InsertItems(self, data, start):
+        self._set_title()
+        i = start
+        for element in data:
+            self.InsertItem(i, element)
+            i += 1
+        self.SetColumnWidth(0, wx.LIST_AUTOSIZE)
+
+    """
+    def color(self, style=DIFFLIB):
+        if style == DIFFLIB:
+            self.list_ctrl.SetItemBackgroundColour(index, "white")
+            pass
+    """
+    def move(self, direction):
+        if direction + 1:
+            self.Select(self.selection, on=False)
+            self.selection += 1
+            self.Select(self.selection % self.nb)
+        elif self.selection > 0:
+            self.Select(self.selection, on=False)
+            self.selection -= 1
+            self.Select(self.selection % self.nb)
+
+    def refresh(self, data):
+        self.selection = 0
+        self.data = data
+        self.nb = len(self.data)
+        self.ClearAll()
+        self.InsertItems(self.data, 0)
+        self.Select(self.selection)
+
+    @property
+    def diff_method(self):
+        return self._diff_method
+
+    @diff_method.setter
+    def diff_method(self, value):
+        self._diff_method = value
+
+    def _set_title(self, title="Diffs"):
+        # font = wx.SystemSettings.GetFont(wx.SYS_DEFAULT_GUI_FONT)
+        self.selection = 0
+        self.InsertColumn(0, title)
+        self.SetColumnWidth(0, -3)
+
+
 class ChooseEngineDialog(wx.Dialog):
 
     def __init__(self, *args, **kwargs):
         super(ChooseEngineDialog, self).__init__(*args, **kwargs)
 
-        self.choice = 1
+        self.choice = self.DIFFLIB
         self.InitUI()
         self.SetSize((250, 200))
         self.SetTitle("Choose Diffs Engine")
@@ -423,9 +479,9 @@ class ChooseEngineDialog(wx.Dialog):
 
     def on_btn_ok(self, event):
         if self.radio.GetValue():
-            self.choice = 1
+            self.choice = DIFFLIB
         elif self.radio2.GetValue():
-            self.choice = 2
+            self.choice = PDML
         self.Destroy()
 
     def on_close(self, e):
