@@ -303,11 +303,18 @@ class MainFrame(wx.Frame):
         engine_menu_item = options_menu.Append(
             wx.ID_ANY, "&Engine",
             "Configure the application")
+        colours_menu_item = options_menu.Append(
+            wx.ID_ANY, "&Colors",
+            "Change the colour scheme")
         menu_bar.Append(options_menu, '&Options')
         self.Bind(
             event=wx.EVT_MENU,
             handler=self.on_engine,
             source=engine_menu_item)
+        self.Bind(
+            event=wx.EVT_MENU,
+            handler=self.on_colours,
+            source=colours_menu_item)
 
         help_menu = wx.Menu()
         about_menu_item = help_menu.Append(
@@ -320,6 +327,16 @@ class MainFrame(wx.Frame):
             source=about_menu_item)
 
         self.SetMenuBar(menu_bar)
+
+    def on_colours(self, event):
+        dlg1 = wx.ColourDialog(self)
+        if dlg1.ShowModal() == wx.ID_OK:
+            colour = dlg1.GetColourData().GetColour()
+            self.bbuffer.colour1 = colour
+        dlg2 = wx.ColourDialog(self)
+        if dlg2.ShowModal() == wx.ID_OK:
+            colour = dlg2.GetColourData().GetColour()
+            self.bbuffer.colour2 = colour
 
     def on_engine(self, event):
         dlg = ChooseEngineDialog(None,
@@ -384,6 +401,7 @@ class MainFrame(wx.Frame):
 
 
 class DiffsBox(wx.ListCtrl):
+
     def __init__(self, *args, **kwargs):
         super(DiffsBox, self).__init__(*args, **kwargs)
         self.data = ["diffs"]
@@ -391,21 +409,22 @@ class DiffsBox(wx.ListCtrl):
         self.nb = len(self.data)
         self.diff_method = DIFFLIB
         self._set_title()
+        self.colour1 = wx.GREEN
+        self.colour2 = wx.RED
 
     def InsertItems(self, data, start):
         self._set_title()
         i = start
-        for element in data:
-            self.InsertItem(i, element)
-            i += 1
-        self.SetColumnWidth(0, wx.LIST_AUTOSIZE)
+        if self.diff_method == DIFFLIB:
+            for element in data:
+                self.InsertItem(i, element)
+                if element[0] == "+":
+                    self.SetItemBackgroundColour(i, self.colour1)
+                elif element[0] == "-":
+                    self.SetItemBackgroundColour(i, self.colour2)
+                i += 1
+            self.SetColumnWidth(0, wx.LIST_AUTOSIZE)
 
-    """
-    def color(self, style=DIFFLIB):
-        if style == DIFFLIB:
-            self.list_ctrl.SetItemBackgroundColour(index, "white")
-            pass
-    """
     def move(self, direction):
         if direction + 1:
             self.Select(self.selection, on=False)
@@ -423,6 +442,22 @@ class DiffsBox(wx.ListCtrl):
         self.ClearAll()
         self.InsertItems(self.data, 0)
         self.Select(self.selection)
+
+    @property
+    def colour2(self):
+        return self._colour2
+
+    @colour2.setter
+    def colour2(self, value):
+        self._colour2 = value
+
+    @property
+    def colour1(self):
+        return self._colour1
+
+    @colour1.setter
+    def colour1(self, value):
+        self._colour1 = value
 
     @property
     def diff_method(self):
