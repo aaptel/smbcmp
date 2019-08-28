@@ -6,22 +6,29 @@ Small curses utility to diff, compare and debug SMB network traces.
 
 [![demo](https://asciinema.org/a/235634.svg)](https://asciinema.org/a/235634)
 
-    
+
 
 Install
 =======
-
-    $ git clone https://github.com/aaptel/smbcmp.git
-    $ cd smbcmp
-    $ python3 -m venv .venv
-    $ source .venv/bin/activate
-    $ pip3 install -r requirements.txt
 
 Dependencies:
 - python3
 - python3-curses
 - python3-lxml (optionnal)
 - tshark (wireshark)
+
+There are no packages for now.
+
+    $ git clone https://github.com/aaptel/smbcmp.git
+    $ cd smbcmp
+    $ PYTHONPATH=$PWD scripts/smbcmp --help
+
+Assuming you have `~/bin` in your `PATH` env var, you can run this to
+add a simple launcher (replace `<DIR>` by the path to the git
+directory).
+
+    echo -e '#!/bin/sh\nset -e\ncd <DIR>\nPYTHONPATH=$(pwd) scripts/smbcmp "$@"' > ~/bin/smbcmp && chmod +x ~/bin/smbcmp
+
 
 Usage
 =====
