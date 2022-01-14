@@ -88,7 +88,12 @@ def single_view_main(stdscr, args):
         if not empty:
             last_packet = tbuf.get_packet()[1]
 
-        k = stdscr.getkey()
+        k = None
+        try:
+            k = stdscr.getkey()
+        except curses.error:
+            pass
+
         if k == 'q':
             return
 
@@ -168,7 +173,11 @@ def diff_view_main(stdscr, args):
             last_lpacket = lbuf.get_packet()[1]
             last_rpacket = rbuf.get_packet()[1]
 
-        k = stdscr.getkey()
+        k = None
+        try:
+            k = stdscr.getkey()
+        except curses.error:
+            pass
         if k == 'q':
             return
 
