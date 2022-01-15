@@ -213,10 +213,26 @@ def smb_summaries(pcap):
     cmd += ['-r', pcap, TSHARK_FILTER_FLAG, '!browser && (smb||smb2)']
     out = subprocess.check_output(cmd).decode('utf-8')
     pkts = {}
+
+    ip_map = {
+        '192.168.123.22': 'A',
+        '192.168.123.1': 'Relay',
+        '192.168.123.4': 'C'
+    };
+
     for line in out.split('\n'):
         m = re.match(r'''\s*(\d+).+?SMB2?\s*\d+\s*(.+)''', line)
+        ips = re.match(r'''.* (\d+\.\d+\.\d+\.\d+) → (\d+\.\d+\.\d+\.\d+).*''', line)
+        ip_info = ""
+
+        if ips:
+            ip_1 = ip_map.get(ips.group(1), ips.group(1))
+            ip_2 = ip_map.get(ips.group(2), ips.group(2))
+            ip_info = ip_1 + " -> " + ip_2 + ": "
+
         if m:
-            pkts[int(m.group(1))] = m.group(2)
+            pkts[int(m.group(1))] = ip_info + m.group(2)
+
     return pkts
 
 
