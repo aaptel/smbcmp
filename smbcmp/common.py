@@ -40,8 +40,9 @@ CONF.add_section('global')
 CRYPTO_KEY = {}
 
 
-def load_config(fn):
-    CONF.read(fn)
+def load_config(config_path):
+    if config_path is not None:
+        CONF.read(config_path)
 
     def k(name, default):
         KEY[name] = CONF['global'].get('key_'+name, default)
@@ -653,6 +654,8 @@ def parse_args(gui=False):
         load_config(args.config)
     elif os.path.exists(DEFAULT_CONFIG):
         load_config(DEFAULT_CONFIG)
+    else:
+        load_config(None)
 
     wireshark_checks(args)
     load_crypto_keys(args)
